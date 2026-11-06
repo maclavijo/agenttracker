@@ -1,9 +1,20 @@
+import type { ExtractTablesWithRelations } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
-import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
+import type { NodePgDatabase, NodePgQueryResultHKT } from 'drizzle-orm/node-postgres';
+import type { PgTransaction } from 'drizzle-orm/pg-core';
 import { Pool } from 'pg';
 import * as schema from './schema.js';
 
 export type Database = NodePgDatabase<typeof schema>;
+
+export type Transaction = PgTransaction<
+  NodePgQueryResultHKT,
+  typeof schema,
+  ExtractTablesWithRelations<typeof schema>
+>;
+
+/** A connection or an open transaction; both can run the same writes. */
+export type Executor = Database | Transaction;
 
 export interface DatabaseConnection {
   readonly db: Database;

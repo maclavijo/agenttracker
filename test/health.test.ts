@@ -5,7 +5,7 @@ import { createDatabase } from '../src/db/client.js';
 
 describe('GET /health', () => {
   const database = createDatabase(databaseUrl());
-  const app = buildApp({ ping: () => database.ping() });
+  const app = buildApp({ db: database.db, ping: () => database.ping() });
 
   beforeAll(async () => {
     await app.ready();
@@ -25,7 +25,9 @@ describe('GET /health', () => {
 });
 
 describe('GET /health when the database is unavailable', () => {
+  const database = createDatabase(databaseUrl());
   const app = buildApp({
+    db: database.db,
     ping: async () => {
       throw new Error('database is unavailable');
     },
@@ -37,6 +39,7 @@ describe('GET /health when the database is unavailable', () => {
 
   afterAll(async () => {
     await app.close();
+    await database.close();
   });
 
   it('responds with 503 and reports that the database is down', async () => {

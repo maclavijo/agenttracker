@@ -1,0 +1,1 @@
+CREATE INDEX "events_entity_seq_idx" ON "events" USING btree ("entity_type","entity_id","seq");

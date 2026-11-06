@@ -60,6 +60,7 @@ needed for local development.
 | `npm test`            | Run the vitest suite                               |
 | `npm run db:generate` | Generate a new migration from `src/db/schema.ts`   |
 | `npm run db:migrate`  | Apply pending migrations to the database           |
+| `npm run db:rebuild-projections` | Truncate the issues projection and replay the event log |
 
 ## Database and migrations
 
@@ -73,6 +74,66 @@ npm run db:migrate
 
 Commit both the generated SQL file and the `drizzle/meta/` files.
 
+### Rebuilding projections
+
+`issues` is a projection of the event log. To truncate it and replay every event:
+
+```sh
+npm run db:rebuild-projections
+```
+
+The command runs in a single transaction, restores the issue keys, timestamps and
+`last_event_seq` from the events, and advances the issue key sequence so later creates continue
+from the right number. It needs the database to be migrated and reachable through `DATABASE_URL`.
+Only `issue.created` events exist in V1 so far; the command fails loudly on an issue event type it
+does not know how to apply rather than silently dropping projection state.
+
+## Issues API
+
+All responses are JSON. Timestamps are ISO-8601 strings. `lastEventSeq` is the `seq` of the latest
+event that shaped the projected row.
+
+### `POST /issues`
+
+Body: `{ "title", "body"?, "status"?, "priority"?, "assignee"? }`
+
+| Field      | Default     | Notes                                             |
+| ---------- | ----------- | ------------------------------------------------- |
+| `title`    | required    | non-empty string                                  |
+| `body`     | `""`        | string                                            |
+| `status`   | `"backlog"` | `backlog`, `todo`, `in_progress`, `done`, `canceled` |
+| `priority` | `0`         | integer 0–4                                       |
+| `assignee` | `null`      | string or null                                    |
+
+Returns `201` with
+`{ id, key, title, body, status, priority, assignee, createdAt, updatedAt, lastEventSeq }`.
+The projection insert, the `issue.created` append and the `last_event_seq` update happen in one
+transaction. The event payload carries an issue snapshot so the projection can be rebuilt.
+
+### `GET /issues?limit=50&cursor=...`
+
+Newest first (descending `key`). `limit` defaults to 50 and must be an integer from 1 to 100. The
+`cursor` is the opaque `nextCursor` from the previous page. Returns
+`{ "issues": [...], "nextCursor": "..." | null }`; `nextCursor` is `null` on the last page. An
+invalid `limit` or `cursor` returns `400`.
+
+### `GET /issues/:id`
+
+Returns the full issue, or `404` with
+`{ "statusCode": 404, "error": "Not Found", "message": "Issue not found" }`.
+
+### `GET /issues/:id/events`
+
+Returns `{ "events": [...] }`, oldest first, with each event row as stored (`id`, `at`,
+`actorType`, `actorId`, `entityType`, `entityId`, `type`, `payload`, `seq`). An unknown issue
+returns the same `404` body.
+
+### Actor attribution
+
+The SPEC requires every event to carry `actor_type` and `actor_id`. Authentication is T3, so T2
+attributes HTTP writes to the deployment actor `agent:api`; T3 replaces that with the bearer-token
+identity. The service layer already takes an explicit actor, so only the HTTP route needs to change.
+
 ## Testing
 
 ```sh
@@ -82,8 +143,11 @@ npm test
 ```
 
 Tests connect to Postgres through `DATABASE_URL`, so the database must be running and migrated.
-They cover the healthy `/health` response against a real database and the 503 response when the
-database is unavailable.
+They cover the healthy `/health` response against a real database, the 503 response when the
+database is unavailable, the issue create/read/pagination/timeline/404 paths, projection rebuild
+equivalence, and a seeded benchmark asserting that `GET /issues?limit=50` on 10,000 issues stays
+under the SPEC p95 target of 50 ms. The database-backed tests truncate both tables between cases
+and run sequentially.
 
 ## CI
 

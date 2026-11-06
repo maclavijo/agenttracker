@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "db:rebuild-projections": "tsx src/db/rebuild-projections.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.4",
