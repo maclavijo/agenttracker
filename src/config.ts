@@ -22,3 +22,14 @@ export function serverPort(env: NodeJS.ProcessEnv = process.env): number {
 
   return port;
 }
+
+/** `WEB_UI_HUMAN_TOKEN`; blank or unset means the web UI comment form is off. */
+export function webUiHumanToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env.WEB_UI_HUMAN_TOKEN;
+
+  if (raw === undefined || raw.trim() === '') {
+    return undefined;
+  }
+
+  return raw;
+}
