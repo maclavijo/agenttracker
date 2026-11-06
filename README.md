@@ -46,6 +46,7 @@ HTTP 503 with `{"ok":false,"db":"down"}`.
 | `PORT`         | `3000`                                                             | HTTP port to listen on     |
 | `AGENT_TOKENS` | none                                                               | Comma-separated `token:actorId` bearer tokens that write as agents |
 | `HUMAN_TOKENS` | none                                                               | Comma-separated `token:actorId` bearer tokens that write as humans |
+| `AGENT_TOKEN`  | none                                                               | Secret the MCP server acts as (see [MCP server](#mcp-server)) |
 
 The local Compose service publishes Postgres on host port `5438` (rather than `5432`, which is
 often already in use). The default `DATABASE_URL` already points at it, so no environment file is
@@ -74,6 +75,7 @@ startup. With no tokens configured the server still starts, but every write is r
 | Script                | What it does                                       |
 | --------------------- | -------------------------------------------------- |
 | `npm run dev`         | Start Fastify with file watching (`tsx watch`)     |
+| `npm run mcp`         | Start the MCP server over stdio (`tsx src/mcp.ts`) |
 | `npm run build`       | Type-check and compile `src/` to `dist/`           |
 | `npm start`           | Run the compiled server from `dist/`               |
 | `npm run typecheck`   | Type-check the project without emitting files      |
@@ -180,6 +182,96 @@ the service layer. The request body can never supply an actor: the body schemas 
 unknown fields, and the tests assert that a body-supplied `actor`, `actorType` or `actorId` is
 ignored in favour of the token identity.
 
+## MCP server
+
+`src/mcp.ts` exposes the tracker to agents over MCP using the official
+[`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk) and the
+**stdio** transport. Every tool calls the same service layer as the HTTP API, so writes still go
+through the event log and the projection, and reads see the same data. The MCP server does not
+open a port and does not change the HTTP API.
+
+Run it locally, or let an MCP client spawn it:
+
+```sh
+AGENT_TOKEN=agent-secret-1 \
+AGENT_TOKENS=agent-secret-1:agent-7 \
+DATABASE_URL=postgres://agenttracker:agenttracker@localhost:5438/agenttracker \
+npm run mcp
+```
+
+`npm run mcp` is for direct use in a terminal; MCP clients should spawn the server directly (an
+npm wrapper can write to stdout, which carries the MCP protocol). Build first, then register the
+compiled entry point:
+
+```sh
+npm run build
+```
+
+```json
+{
+  "mcpServers": {
+    "agenttracker": {
+      "command": "node",
+      "args": ["/absolute/path/to/agenttracker/dist/mcp.js"],
+      "env": {
+        "DATABASE_URL": "postgres://agenttracker:agenttracker@localhost:5438/agenttracker",
+        "AGENT_TOKENS": "agent-secret-1:agent-7",
+        "AGENT_TOKEN": "agent-secret-1"
+      }
+    }
+  }
+}
+```
+
+To run from source without building, point the client at the local `tsx` binary instead:
+
+```json
+{
+  "mcpServers": {
+    "agenttracker": {
+      "command": "/absolute/path/to/agenttracker/node_modules/.bin/tsx",
+      "args": ["/absolute/path/to/agenttracker/src/mcp.ts"],
+      "env": {
+        "DATABASE_URL": "postgres://agenttracker:agenttracker@localhost:5438/agenttracker",
+        "AGENT_TOKENS": "agent-secret-1:agent-7",
+        "AGENT_TOKEN": "agent-secret-1"
+      }
+    }
+  }
+}
+```
+
+### MCP environment variables
+
+| Variable       | Required | Purpose                                                            |
+| -------------- | -------- | ------------------------------------------------------------------ |
+| `DATABASE_URL` | no       | Postgres connection string; defaults to the local Compose database |
+| `AGENT_TOKEN`  | yes      | The secret whose identity is recorded on every MCP tool call       |
+| `AGENT_TOKENS` | yes      | `token:actorId` directory that must contain `AGENT_TOKEN`          |
+| `HUMAN_TOKENS` | no       | Same directory format; parsed for compatibility with the HTTP API  |
+
+`AGENT_TOKEN` is looked up in the same token directory as the HTTP bearer tokens, and the resolved
+`actor_type`/`actor_id` is passed to the service layer. Unlike the public HTTP read routes, every
+MCP tool call requires a valid token: a missing or unknown `AGENT_TOKEN` makes the call fail with
+an MCP tool error carrying `401` and a message naming `AGENT_TOKEN`. The server still starts so
+that `tools/list` remains inspectable. Logs go to stderr; stdout is reserved for the protocol.
+
+### MCP tools
+
+| Tool            | Arguments                                                          |
+| --------------- | ------------------------------------------------------------------ |
+| `issue_create`  | `title`, `body?`, `status?`, `priority?`, `assignee?`              |
+| `issue_get`     | `id`                                                               |
+| `issue_list`    | `limit?` (1–100), `cursor?`                                        |
+| `issue_update`  | `id`, plus any of `title`, `body`, `status`, `priority`, `assignee` |
+| `comment_add`   | `issueId`, `body`                                                  |
+
+Inputs use Zod schemas mirroring the HTTP route schemas. Successful results are JSON text
+content. A `400`, `401` or `404` from the service layer is returned as a failed MCP tool result
+(`isError: true`) whose JSON text has the same `{ statusCode, error, message }` body as the HTTP
+API, so the server never crashes on a bad tool call. `stream_tail` is intentionally not part of
+this server.
+
 ## Testing
 
 ```sh
@@ -194,8 +286,11 @@ database is unavailable, the issue create/read/pagination/timeline/404 paths, be
 configuration and 401 responses, agent versus human attribution (including a body-supplied actor
 being ignored), partial issue updates and their single changed-fields event, comment round-trips,
 projection rebuild equivalence for creates, updates and comments, and a seeded benchmark asserting
-that `GET /issues?limit=50` on 10,000 issues stays under the SPEC p95 target of 50 ms. The
-database-backed tests truncate both tables between cases and run sequentially.
+that `GET /issues?limit=50` on 10,000 issues stays under the SPEC p95 target of 50 ms. An MCP
+integration test spawns `src/mcp.ts` over stdio, performs the `initialize` handshake, lists the
+tools and runs an `issue_create` -> `issue_get` -> `comment_add` roundtrip, including the
+`tools/list` shape, pagination, `400`/`404` tool errors and the `401` for a missing or unknown
+`AGENT_TOKEN`. The database-backed tests truncate both tables between cases and run sequentially.
 
 ## CI
 
