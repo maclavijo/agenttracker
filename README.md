@@ -44,10 +44,30 @@ HTTP 503 with `{"ok":false,"db":"down"}`.
 | -------------- | ------------------------------------------------------------------ | -------------------------- |
 | `DATABASE_URL` | `postgres://agenttracker:agenttracker@localhost:5438/agenttracker` | Postgres connection string |
 | `PORT`         | `3000`                                                             | HTTP port to listen on     |
+| `AGENT_TOKENS` | none                                                               | Comma-separated `token:actorId` bearer tokens that write as agents |
+| `HUMAN_TOKENS` | none                                                               | Comma-separated `token:actorId` bearer tokens that write as humans |
 
 The local Compose service publishes Postgres on host port `5438` (rather than `5432`, which is
 often already in use). The default `DATABASE_URL` already points at it, so no environment file is
 needed for local development.
+
+### Authentication
+
+Writes are authenticated with static bearer tokens from `AGENT_TOKENS` and `HUMAN_TOKENS`. Each
+variable is a comma-separated list of `token:actorId` entries; the first colon separates the secret
+from the actor id. For example:
+
+```sh
+AGENT_TOKENS=agent-secret-1:agent-7,agent-secret-2:agent-9 \
+HUMAN_TOKENS=human-secret:dracosian \
+npm run dev
+```
+
+`POST /issues`, `PATCH /issues/:id` and `POST /issues/:id/comments` require
+`Authorization: Bearer <token>`. A missing, malformed or unknown token returns a JSON `401`
+(`{ "statusCode": 401, "error": "Unauthorized", "message": "A valid bearer token is required" }`).
+Read routes stay public in V1. A malformed token list or the same token configured twice fails
+startup. With no tokens configured the server still starts, but every write is rejected.
 
 ## Scripts
 
@@ -82,11 +102,13 @@ Commit both the generated SQL file and the `drizzle/meta/` files.
 npm run db:rebuild-projections
 ```
 
-The command runs in a single transaction, restores the issue keys, timestamps and
-`last_event_seq` from the events, and advances the issue key sequence so later creates continue
+The command runs in a single transaction and folds the log in `seq` order: `issue.created` seeds
+a row, `issue.updated` applies the changed fields it carries, and `comment.created` leaves the
+projection alone because comments are read from the event log itself. It restores issue keys,
+timestamps and `last_event_seq`, then advances the issue key sequence so later creates continue
 from the right number. It needs the database to be migrated and reachable through `DATABASE_URL`.
-Only `issue.created` events exist in V1 so far; the command fails loudly on an issue event type it
-does not know how to apply rather than silently dropping projection state.
+The command fails loudly on an issue event type it does not know how to apply rather than silently
+dropping projection state.
 
 ## Issues API
 
@@ -128,11 +150,35 @@ Returns `{ "events": [...] }`, oldest first, with each event row as stored (`id`
 `actorType`, `actorId`, `entityType`, `entityId`, `type`, `payload`, `seq`). An unknown issue
 returns the same `404` body.
 
+### `PATCH /issues/:id`
+
+Requires a bearer token. Body: any non-empty subset of
+`{ "title", "body", "status", "priority", "assignee" }`, with the same field rules as
+`POST /issues`; `"assignee": null` clears the assignee. Returns `200` with the full updated issue.
+The projection write and exactly one `issue.updated` append happen in one transaction, and that
+event payload contains only the fields supplied in the patch (for example `{ "title": "New" }`),
+which is what a projection rebuild replays. An invalid status or priority returns `400`; an
+unknown issue and an empty patch return `404` and `400` respectively.
+
+### `POST /issues/:id/comments`
+
+Requires a bearer token. Body: `{ "body" }` (non-empty string). Returns `201` with
+`{ id, issueId, body, actorType, actorId, createdAt }` and appends a `comment.created` event whose
+payload is `{ "body" }`. The comment id is the event id. An unknown issue returns the usual `404`.
+
+### `GET /issues/:id/comments`
+
+Public. Returns `{ "comments": [...] }`, oldest first, in the same shape as the `POST` response.
+Comments are derived from `comment.created` events, so they survive
+`db:rebuild-projections`; adding one does not change the issue projection.
+
 ### Actor attribution
 
-The SPEC requires every event to carry `actor_type` and `actor_id`. Authentication is T3, so T2
-attributes HTTP writes to the deployment actor `agent:api`; T3 replaces that with the bearer-token
-identity. The service layer already takes an explicit actor, so only the HTTP route needs to change.
+The SPEC requires every event to carry `actor_type` and `actor_id`. The bearer-token hook resolves
+`Authorization: Bearer <token>` into an actor identity, and every write route passes that actor to
+the service layer. The request body can never supply an actor: the body schemas reject or strip
+unknown fields, and the tests assert that a body-supplied `actor`, `actorType` or `actorId` is
+ignored in favour of the token identity.
 
 ## Testing
 
@@ -144,10 +190,12 @@ npm test
 
 Tests connect to Postgres through `DATABASE_URL`, so the database must be running and migrated.
 They cover the healthy `/health` response against a real database, the 503 response when the
-database is unavailable, the issue create/read/pagination/timeline/404 paths, projection rebuild
-equivalence, and a seeded benchmark asserting that `GET /issues?limit=50` on 10,000 issues stays
-under the SPEC p95 target of 50 ms. The database-backed tests truncate both tables between cases
-and run sequentially.
+database is unavailable, the issue create/read/pagination/timeline/404 paths, bearer-token
+configuration and 401 responses, agent versus human attribution (including a body-supplied actor
+being ignored), partial issue updates and their single changed-fields event, comment round-trips,
+projection rebuild equivalence for creates, updates and comments, and a seeded benchmark asserting
+that `GET /issues?limit=50` on 10,000 issues stays under the SPEC p95 target of 50 ms. The
+database-backed tests truncate both tables between cases and run sequentially.
 
 ## CI
 

@@ -1,8 +1,8 @@
 import { and, asc, desc, eq, lt } from 'drizzle-orm';
 import type { Database } from '../db/client.js';
 import { events, issues } from '../db/schema.js';
-import { appendEvent } from '../events.js';
-import type { Actor } from '../events.js';
+import { appendEvent, isActorType } from '../events.js';
+import type { Actor, ActorType } from '../events.js';
 
 export const ISSUE_STATUSES = ['backlog', 'todo', 'in_progress', 'done', 'canceled'] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
@@ -17,6 +17,8 @@ export const DEFAULT_STATUS: IssueStatus = 'backlog';
 export const DEFAULT_PRIORITY = 0;
 
 export const ISSUE_CREATED_EVENT = 'issue.created';
+export const ISSUE_UPDATED_EVENT = 'issue.updated';
+export const COMMENT_CREATED_EVENT = 'comment.created';
 
 export type Issue = typeof issues.$inferSelect;
 export type IssueEvent = typeof events.$inferSelect;
@@ -27,6 +29,27 @@ export interface CreateIssueInput {
   readonly status?: IssueStatus;
   readonly priority?: number;
   readonly assignee?: string | null;
+}
+
+export interface UpdateIssueInput {
+  readonly title?: string;
+  readonly body?: string;
+  readonly status?: IssueStatus;
+  readonly priority?: number;
+  readonly assignee?: string | null;
+}
+
+export interface CreateCommentInput {
+  readonly body: string;
+}
+
+export interface Comment {
+  readonly id: number;
+  readonly issueId: string;
+  readonly body: string;
+  readonly actorType: ActorType;
+  readonly actorId: string;
+  readonly createdAt: string;
 }
 
 export interface ListIssuesOptions {
@@ -97,17 +120,18 @@ export async function createIssue(
       throw new Error('createIssue: the issues insert returned no row');
     }
 
-    const seq = await appendEvent(tx, {
+    const appended = await appendEvent(tx, {
       actor,
       entityType: 'issue',
       entityId: created.id,
       type: ISSUE_CREATED_EVENT,
       payload: { issue: toIssueSnapshot(created) },
+      at: now,
     });
 
     const [projected] = await tx
       .update(issues)
-      .set({ lastEventSeq: seq })
+      .set({ lastEventSeq: appended.seq })
       .where(eq(issues.id, created.id))
       .returning();
 
@@ -117,6 +141,152 @@ export async function createIssue(
 
     return projected;
   });
+}
+
+/**
+ * Applies a partial update and appends exactly one `issue.updated` event.
+ *
+ * The event payload contains only the fields the caller supplied, so a rebuild
+ * replays the same changes. The row is locked for the transaction so concurrent
+ * updates cannot interleave events and projection writes. Returns null when the
+ * issue does not exist.
+ */
+export async function updateIssue(
+  db: Database,
+  actor: Actor,
+  id: string,
+  input: UpdateIssueInput,
+): Promise<Issue | null> {
+  return db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(issues)
+      .where(eq(issues.id, id))
+      .limit(1)
+      .for('update');
+
+    if (existing === undefined) {
+      return null;
+    }
+
+    const changes: Record<string, unknown> = {};
+    const columns: Partial<typeof issues.$inferInsert> = {};
+
+    if (input.title !== undefined) {
+      changes['title'] = input.title;
+      columns.title = input.title;
+    }
+
+    if (input.body !== undefined) {
+      changes['body'] = input.body;
+      columns.body = input.body;
+    }
+
+    if (input.status !== undefined) {
+      changes['status'] = input.status;
+      columns.status = input.status;
+    }
+
+    if (input.priority !== undefined) {
+      changes['priority'] = input.priority;
+      columns.priority = input.priority;
+    }
+
+    if (input.assignee !== undefined) {
+      changes['assignee'] = input.assignee;
+      columns.assignee = input.assignee;
+    }
+
+    if (Object.keys(changes).length === 0) {
+      throw new RangeError('updateIssue: at least one field must be provided');
+    }
+
+    const now = new Date();
+    const appended = await appendEvent(tx, {
+      actor,
+      entityType: 'issue',
+      entityId: id,
+      type: ISSUE_UPDATED_EVENT,
+      payload: changes,
+      at: now,
+    });
+
+    const [updated] = await tx
+      .update(issues)
+      .set({ ...columns, updatedAt: now, lastEventSeq: appended.seq })
+      .where(eq(issues.id, id))
+      .returning();
+
+    if (updated === undefined) {
+      throw new Error('updateIssue: the projection update returned no row');
+    }
+
+    return updated;
+  });
+}
+
+/**
+ * Appends a `comment.created` event for an existing issue and returns the
+ * comment. Returns null when the issue does not exist.
+ */
+export async function createComment(
+  db: Database,
+  actor: Actor,
+  issueId: string,
+  input: CreateCommentInput,
+): Promise<Comment | null> {
+  return db.transaction(async (tx) => {
+    const [issue] = await tx
+      .select({ id: issues.id })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .limit(1);
+
+    if (issue === undefined) {
+      return null;
+    }
+
+    const appended = await appendEvent(tx, {
+      actor,
+      entityType: 'issue',
+      entityId: issueId,
+      type: COMMENT_CREATED_EVENT,
+      payload: { body: input.body },
+      at: new Date(),
+    });
+
+    return {
+      id: appended.id,
+      issueId,
+      body: input.body,
+      actorType: actor.type,
+      actorId: actor.id,
+      createdAt: appended.at.toISOString(),
+    };
+  });
+}
+
+/** Comments for one issue, oldest first. Null when the issue does not exist. */
+export async function listComments(db: Database, issueId: string): Promise<Comment[] | null> {
+  const issue = await getIssue(db, issueId);
+
+  if (issue === null) {
+    return null;
+  }
+
+  const rows = await db
+    .select()
+    .from(events)
+    .where(
+      and(
+        eq(events.entityType, 'issue'),
+        eq(events.entityId, issueId),
+        eq(events.type, COMMENT_CREATED_EVENT),
+      ),
+    )
+    .orderBy(asc(events.seq));
+
+  return rows.map(toComment);
 }
 
 /** Newest first. The cursor is opaque to clients. */
@@ -180,6 +350,27 @@ export function toIssueSnapshot(issue: Issue): IssueSnapshot {
     assignee: issue.assignee,
     createdAt: issue.createdAt.toISOString(),
     updatedAt: issue.updatedAt.toISOString(),
+  };
+}
+
+function toComment(event: IssueEvent): Comment {
+  const body = event.payload['body'];
+
+  if (typeof body !== 'string') {
+    throw new Error(`comment event at seq ${event.seq} does not have a string body`);
+  }
+
+  if (!isActorType(event.actorType)) {
+    throw new Error(`comment event at seq ${event.seq} has an unknown actor_type`);
+  }
+
+  return {
+    id: event.id,
+    issueId: event.entityId,
+    body,
+    actorType: event.actorType,
+    actorId: event.actorId,
+    createdAt: event.at.toISOString(),
   };
 }
 
