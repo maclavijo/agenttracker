@@ -3,7 +3,7 @@ import { databaseUrl, serverPort } from './config.js';
 import { createDatabase } from './db/client.js';
 
 const database = createDatabase(databaseUrl());
-const app = buildApp({ ping: () => database.ping() }, { logger: true });
+const app = buildApp({ db: database.db, ping: () => database.ping() }, { logger: true });
 
 let shuttingDown = false;
 

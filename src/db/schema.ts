@@ -1,6 +1,7 @@
 import {
   bigint,
   bigserial,
+  index,
   jsonb,
   pgTable,
   serial,
@@ -9,17 +10,21 @@ import {
   timestamp,
 } from 'drizzle-orm/pg-core';
 
-export const events = pgTable('events', {
-  id: bigserial('id', { mode: 'number' }).primaryKey(),
-  at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
-  actorType: text('actor_type').notNull(),
-  actorId: text('actor_id').notNull(),
-  entityType: text('entity_type').notNull(),
-  entityId: text('entity_id').notNull(),
-  type: text('type').notNull(),
-  payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
-  seq: bigserial('seq', { mode: 'number' }).notNull().unique(),
-});
+export const events = pgTable(
+  'events',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+    actorType: text('actor_type').notNull(),
+    actorId: text('actor_id').notNull(),
+    entityType: text('entity_type').notNull(),
+    entityId: text('entity_id').notNull(),
+    type: text('type').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    seq: bigserial('seq', { mode: 'number' }).notNull().unique(),
+  },
+  (table) => [index('events_entity_seq_idx').on(table.entityType, table.entityId, table.seq)],
+);
 
 export const issues = pgTable('issues', {
   id: text('id').primaryKey(),
