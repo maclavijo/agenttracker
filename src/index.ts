@@ -2,6 +2,7 @@ import { parseTokenDirectory } from './auth.js';
 import { buildApp } from './app.js';
 import { databaseUrl, serverPort } from './config.js';
 import { createDatabase } from './db/client.js';
+import { EventStreamHub } from './stream/hub.js';
 
 const tokens = parseTokenDirectory();
 
@@ -12,8 +13,9 @@ if (tokens.size === 0) {
 }
 
 const database = createDatabase(databaseUrl());
+const stream = new EventStreamHub(database.db, { connectionString: databaseUrl() });
 const app = buildApp(
-  { db: database.db, ping: () => database.ping(), tokens },
+  { db: database.db, ping: () => database.ping(), tokens, stream },
   { logger: true },
 );
 
