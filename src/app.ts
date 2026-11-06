@@ -1,11 +1,14 @@
 import Fastify from 'fastify';
 import type { FastifyInstance, FastifyServerOptions } from 'fastify';
+import type { ActorIdentity, TokenDirectory } from './auth.js';
 import type { Database } from './db/client.js';
 import { registerIssueRoutes } from './issues/routes.js';
 
 export interface AppDependencies {
   db: Database;
   ping(): Promise<void>;
+  /** Bearer tokens for write routes. Empty when omitted, so writes are rejected. */
+  readonly tokens?: TokenDirectory;
 }
 
 export function buildApp(
@@ -13,6 +16,9 @@ export function buildApp(
   options: FastifyServerOptions = {},
 ): FastifyInstance {
   const app = Fastify(options);
+  const tokens = dependencies.tokens ?? new Map<string, ActorIdentity>();
+
+  app.decorateRequest('actor', null);
 
   app.get('/health', async (_request, reply) => {
     try {
@@ -24,7 +30,7 @@ export function buildApp(
     }
   });
 
-  registerIssueRoutes(app, dependencies.db);
+  registerIssueRoutes(app, dependencies.db, tokens);
 
   return app;
 }

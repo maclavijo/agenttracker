@@ -4,7 +4,13 @@ import { databaseUrl } from '../src/config.js';
 import { createDatabase } from '../src/db/client.js';
 import { appendEvent } from '../src/events.js';
 import { rebuildProjections } from '../src/issues/rebuild.js';
-import { truncateAll } from './support.js';
+import {
+  AGENT_ACTOR_ID,
+  AGENT_TOKEN,
+  bearerAuthorization,
+  testTokens,
+  truncateAll,
+} from './support.js';
 
 interface IssueJson {
   id: string;
@@ -57,7 +63,7 @@ interface CreateBody {
 }
 
 const database = createDatabase(databaseUrl());
-const app = buildApp({ db: database.db, ping: () => database.ping() });
+const app = buildApp({ db: database.db, ping: () => database.ping(), tokens: testTokens });
 
 beforeAll(async () => {
   await app.ready();
@@ -77,6 +83,7 @@ async function createIssue(overrides: Partial<CreateBody> = {}): Promise<IssueJs
   const response = await app.inject({
     method: 'POST',
     url: '/issues',
+    headers: bearerAuthorization(AGENT_TOKEN),
     payload: { title: 'A test issue', ...overrides },
   });
 
@@ -131,7 +138,7 @@ describe('POST /issues', () => {
 
     expect(event).toMatchObject({
       actorType: 'agent',
-      actorId: 'api',
+      actorId: AGENT_ACTOR_ID,
       entityType: 'issue',
       entityId: issue.id,
       type: 'issue.created',
@@ -169,7 +176,12 @@ describe('POST /issues', () => {
     ];
 
     for (const payload of invalidBodies) {
-      const response = await app.inject({ method: 'POST', url: '/issues', payload });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/issues',
+        headers: bearerAuthorization(AGENT_TOKEN),
+        payload,
+      });
 
       expect(response.statusCode).toBe(400);
       expect(response.headers['content-type']).toContain('application/json');
@@ -180,6 +192,7 @@ describe('POST /issues', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/issues',
+      headers: bearerAuthorization(AGENT_TOKEN),
       payload: { title: 'Extra fields', id: 'forged-id', lastEventSeq: 999 },
     });
 
@@ -263,7 +276,7 @@ describe('GET /issues/:id/events', () => {
     const first = await createIssue({ title: 'First' });
     const second = await createIssue({ title: 'Second' });
 
-    const appendedSeq = await appendEvent(database.db, {
+    const { seq: appendedSeq } = await appendEvent(database.db, {
       actor: { type: 'agent', id: 'timeline-test' },
       entityType: 'issue',
       entityId: first.id,
