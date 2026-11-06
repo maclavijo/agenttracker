@@ -174,6 +174,44 @@ Public. Returns `{ "comments": [...] }`, oldest first, in the same shape as the 
 Comments are derived from `comment.created` events, so they survive
 `db:rebuild-projections`; adding one does not change the issue projection.
 
+### `GET /stream`
+
+Server-sent events for the live activity stream. The response stays open; each event is one frame:
+
+```
+id: <seq>
+event: <event type>
+data: {"id":...,"at":...,"actorType":...,"actorId":...,"entityType":...,"entityId":...,"type":...,"payload":...,"seq":...}
+```
+
+`data` is a single line holding the full event, exactly the shape `GET /issues/:id/events` returns.
+
+- `?since=<seq>` replays every committed event with `seq > since`, then pushes new events as they
+  are appended. `?since=0` replays the whole log.
+- `Last-Event-ID` is used instead when `since` is absent, so a reconnecting `EventSource` resumes
+  where it stopped.
+- With neither, the stream starts at the current head of the log: only events appended after the
+  connection opens are delivered. That is the live-tail default; a client that wants history asks
+  for it with `?since=0`. Implicitly replaying the whole log on every new connection would be an
+  unbounded, surprising backlog, and browsers already send `Last-Event-ID` when they reconnect.
+
+The stream sends `retry: 3000` and a `: heartbeat` comment every 15 seconds so idle proxies do not
+time out. A client that stops reading is disconnected once its unsent buffer passes a fixed bound,
+so a slow or abandoned connection cannot grow memory without limit.
+
+Delivery is push, not polling. `appendEvent` publishes the new `seq` on the `agenttracker_events`
+Postgres channel in the same transaction as the insert; the API server keeps one dedicated `LISTEN`
+connection, reads the committed row and fans it out to connected clients. Postgres delivers a
+notification only when its transaction commits, so a rolled-back append is never streamed, and a
+write made by another process — including the MCP server — appears live on connected streams too.
+If that listener connection drops it is reopened after a short delay; events committed while it was
+down are not replayed by the hub, and a client that wants them reconnects with `since` or
+`Last-Event-ID`.
+
+```sh
+curl -N 'http://localhost:3000/stream?since=0'
+```
+
 ### Actor attribution
 
 The SPEC requires every event to carry `actor_type` and `actor_id`. The bearer-token hook resolves
@@ -286,7 +324,11 @@ database is unavailable, the issue create/read/pagination/timeline/404 paths, be
 configuration and 401 responses, agent versus human attribution (including a body-supplied actor
 being ignored), partial issue updates and their single changed-fields event, comment round-trips,
 projection rebuild equivalence for creates, updates and comments, and a seeded benchmark asserting
-that `GET /issues?limit=50` on 10,000 issues stays under the SPEC p95 target of 50 ms. An MCP
+that `GET /issues?limit=50` on 10,000 issues stays under the SPEC p95 target of 50 ms. The live
+stream tests open real SSE connections and cover replay from `since`, `Last-Event-ID` precedence,
+the head-of-log default, multi-batch replay order, the frame shape, live delivery of appends, the
+SPEC append-to-delivery p95 target of 150 ms, retry/heartbeat frames, invalid input, disconnect
+cleanup (no leaked subscribers) and recovery after the listener connection is terminated. An MCP
 integration test spawns `src/mcp.ts` over stdio, performs the `initialize` handshake, lists the
 tools and runs an `issue_create` -> `issue_get` -> `comment_add` roundtrip, including the
 `tools/list` shape, pagination, `400`/`404` tool errors and the `401` for a missing or unknown

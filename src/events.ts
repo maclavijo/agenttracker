@@ -1,5 +1,12 @@
+import { sql } from 'drizzle-orm';
 import type { Executor } from './db/client.js';
 import { events } from './db/schema.js';
+
+/**
+ * The Postgres notification channel the live stream listens on. Appends publish
+ * the new `seq` on this channel; see `appendEvent`.
+ */
+export const EVENT_STREAM_CHANNEL = 'agenttracker_events';
 
 export const ACTOR_TYPES = ['human', 'agent'] as const;
 
@@ -34,12 +41,46 @@ export interface AppendedEvent {
   readonly at: Date;
 }
 
+/** One committed event, in the JSON shape the HTTP API returns. */
+export type EventRecord = typeof events.$inferSelect;
+
+export interface EventJson {
+  readonly id: number;
+  readonly at: string;
+  readonly actorType: string;
+  readonly actorId: string;
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly type: string;
+  readonly payload: Record<string, unknown>;
+  readonly seq: number;
+}
+
+export function toEventJson(event: EventRecord): EventJson {
+  return {
+    id: event.id,
+    at: event.at.toISOString(),
+    actorType: event.actorType,
+    actorId: event.actorId,
+    entityType: event.entityType,
+    entityId: event.entityId,
+    type: event.type,
+    payload: event.payload,
+    seq: event.seq,
+  };
+}
+
 /**
  * Appends one row to the event log and returns its id, sequence number and
  * timestamp.
  *
  * Pass a transaction (`Executor`) to make the append atomic with the projection
  * write that consumes the returned `seq`.
+ *
+ * The append also publishes its `seq` on `EVENT_STREAM_CHANNEL`. Postgres
+ * delivers notifications only when the surrounding transaction commits, so a
+ * rolled-back append never reaches the live stream and the HTTP server, the MCP
+ * server and any other process sharing the database all fan out the same event.
  */
 export async function appendEvent(
   executor: Executor,
@@ -61,6 +102,8 @@ export async function appendEvent(
   if (row === undefined) {
     throw new Error('appendEvent: the events insert returned no row');
   }
+
+  await executor.execute(sql`SELECT pg_notify(${EVENT_STREAM_CHANNEL}, ${String(row.seq)})`);
 
   return row;
 }
