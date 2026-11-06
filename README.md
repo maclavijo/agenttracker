@@ -40,13 +40,14 @@ HTTP 503 with `{"ok":false,"db":"down"}`.
 
 ### Environment variables
 
-| Variable       | Default                                                            | Purpose                    |
-| -------------- | ------------------------------------------------------------------ | -------------------------- |
-| `DATABASE_URL` | `postgres://agenttracker:agenttracker@localhost:5438/agenttracker` | Postgres connection string |
-| `PORT`         | `3000`                                                             | HTTP port to listen on     |
-| `AGENT_TOKENS` | none                                                               | Comma-separated `token:actorId` bearer tokens that write as agents |
-| `HUMAN_TOKENS` | none                                                               | Comma-separated `token:actorId` bearer tokens that write as humans |
-| `AGENT_TOKEN`  | none                                                               | Secret the MCP server acts as (see [MCP server](#mcp-server)) |
+| Variable             | Default                                                            | Purpose                    |
+| -------------------- | ------------------------------------------------------------------ | -------------------------- |
+| `DATABASE_URL`       | `postgres://agenttracker:agenttracker@localhost:5438/agenttracker` | Postgres connection string |
+| `PORT`               | `3000`                                                             | HTTP port to listen on     |
+| `AGENT_TOKENS`       | none                                                               | Comma-separated `token:actorId` bearer tokens that write as agents |
+| `HUMAN_TOKENS`       | none                                                               | Comma-separated `token:actorId` bearer tokens that write as humans |
+| `WEB_UI_HUMAN_TOKEN` | none                                                               | Human token (from `HUMAN_TOKENS`) the web UI posts comments as; unset disables commenting |
+| `AGENT_TOKEN`        | none                                                               | Secret the MCP server acts as (see [MCP server](#mcp-server)) |
 
 The local Compose service publishes Postgres on host port `5438` (rather than `5432`, which is
 often already in use). The default `DATABASE_URL` already points at it, so no environment file is
@@ -220,6 +221,32 @@ the service layer. The request body can never supply an actor: the body schemas 
 unknown fields, and the tests assert that a body-supplied `actor`, `actorType` or `actorId` is
 ignored in favour of the token identity.
 
+## Web UI
+
+A plain, self-contained page is served at `http://localhost:3000/`. It is a client of the same HTTP
+API: it lists issues newest first, shows one issue with its timeline (every event marked `AGENT` or
+`HUMAN`), and appends live events from `GET /stream` through `EventSource` without a reload, with a
+visible live/reconnecting state. The server renders one HTML response with inline CSS and JS — no
+build step, no framework — and the V1 page is deliberately unpolished.
+
+The comment box writes as a **human** actor and the browser never receives a bearer token. It posts
+`{ "body": "..." }` to the small server-side proxy `POST /ui/issues/:id/comments`; that proxy
+authenticates with `WEB_UI_HUMAN_TOKEN` and calls the same service layer as the HTTP API. The token
+must be listed in `HUMAN_TOKENS`; an unknown token, or one that resolves to an agent, fails startup.
+When the variable is unset the page still renders read-only, the comment form is disabled and the
+proxy answers `503`.
+
+```sh
+AGENT_TOKENS=agent-secret-1:agent-7 \
+HUMAN_TOKENS=human-secret:dracosian \
+WEB_UI_HUMAN_TOKEN=human-secret \
+npm run dev
+# open http://localhost:3000/
+```
+
+V1 has no sessions or users table, so the page acts as the one configured human. Keep the UI behind
+your normal trusted boundary.
+
 ## MCP server
 
 `src/mcp.ts` exposes the tracker to agents over MCP using the official
@@ -332,7 +359,11 @@ cleanup (no leaked subscribers) and recovery after the listener connection is te
 integration test spawns `src/mcp.ts` over stdio, performs the `initialize` handshake, lists the
 tools and runs an `issue_create` -> `issue_get` -> `comment_add` roundtrip, including the
 `tools/list` shape, pagination, `400`/`404` tool errors and the `401` for a missing or unknown
-`AGENT_TOKEN`. The database-backed tests truncate both tables between cases and run sequentially.
+`AGENT_TOKEN`. The database-backed tests truncate both tables between cases and run sequentially. The web UI
+tests read `GET /` and run the served page in jsdom: they assert the expected page elements, comment
+attribution through the human-token proxy with no token in any response body, that the timeline
+renders both an agent and a human event, live appends from a fake `EventSource` with the
+live/reconnecting state, and the empty and error states.
 
 ## CI
 

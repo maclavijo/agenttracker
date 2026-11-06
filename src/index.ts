@@ -1,6 +1,6 @@
 import { parseTokenDirectory } from './auth.js';
 import { buildApp } from './app.js';
-import { databaseUrl, serverPort } from './config.js';
+import { databaseUrl, serverPort, webUiHumanToken } from './config.js';
 import { createDatabase } from './db/client.js';
 import { EventStreamHub } from './stream/hub.js';
 
@@ -12,10 +12,16 @@ if (tokens.size === 0) {
   );
 }
 
+const uiToken = webUiHumanToken();
+
+if (uiToken === undefined) {
+  console.warn('WEB_UI_HUMAN_TOKEN is not set; the web UI comment form is disabled.');
+}
+
 const database = createDatabase(databaseUrl());
 const stream = new EventStreamHub(database.db, { connectionString: databaseUrl() });
 const app = buildApp(
-  { db: database.db, ping: () => database.ping(), tokens, stream },
+  { db: database.db, ping: () => database.ping(), tokens, stream, webUiHumanToken: uiToken },
   { logger: true },
 );
 

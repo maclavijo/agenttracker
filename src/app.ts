@@ -6,6 +6,8 @@ import { registerIssueRoutes } from './issues/routes.js';
 import type { EventStreamHub } from './stream/hub.js';
 import { registerStreamRoutes } from './stream/routes.js';
 import type { StreamRouteOptions } from './stream/routes.js';
+import { resolveWebUiHumanActor } from './web/config.js';
+import { registerWebRoutes } from './web/routes.js';
 
 export interface AppDependencies {
   db: Database;
@@ -18,14 +20,20 @@ export interface AppDependencies {
    */
   readonly stream?: EventStreamHub;
   readonly streamOptions?: StreamRouteOptions;
+  /**
+   * `WEB_UI_HUMAN_TOKEN`: the human the web UI posts comments as. Omitted means
+   * the UI stays read-only. The value is only ever used server-side.
+   */
+  readonly webUiHumanToken?: string | undefined;
 }
 
 export function buildApp(
   dependencies: AppDependencies,
   options: FastifyServerOptions = {},
 ): FastifyInstance {
-  const app = Fastify(options);
   const tokens = dependencies.tokens ?? new Map<string, ActorIdentity>();
+  const webUiHumanActor = resolveWebUiHumanActor(tokens, dependencies.webUiHumanToken);
+  const app = Fastify(options);
 
   app.decorateRequest('actor', null);
 
@@ -40,6 +48,7 @@ export function buildApp(
   });
 
   registerIssueRoutes(app, dependencies.db, tokens);
+  registerWebRoutes(app, dependencies.db, { humanActor: webUiHumanActor });
 
   const stream = dependencies.stream;
 
