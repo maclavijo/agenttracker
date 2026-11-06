@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Detect project
+        id: probe
+        run: |
+          if [ -f package.json ]; then echo "present=true" >> "\"; else echo "present=false" >> "\"; fi
+      - name: Install
+        if: steps.probe.outputs.present == 'true'
+        run: npm ci
+      - name: Typecheck
+        if: steps.probe.outputs.present == 'true'
+        run: npm run typecheck --if-present
+      - name: Test
+        if: steps.probe.outputs.present == 'true'
+        run: npm test --if-present
