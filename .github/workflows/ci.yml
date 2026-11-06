@@ -10,21 +10,33 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: agenttracker
+          POSTGRES_PASSWORD: agenttracker
+          POSTGRES_DB: agenttracker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agenttracker -d agenttracker"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://agenttracker:agenttracker@localhost:5432/agenttracker
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Detect project
-        id: probe
-        run: |
-          if [ -f package.json ]; then echo "present=true" >> "\"; else echo "present=false" >> "\"; fi
+          cache: npm
       - name: Install
-        if: steps.probe.outputs.present == 'true'
         run: npm ci
       - name: Typecheck
-        if: steps.probe.outputs.present == 'true'
-        run: npm run typecheck --if-present
+        run: npm run typecheck
+      - name: Migrate
+        run: npm run db:migrate
       - name: Test
-        if: steps.probe.outputs.present == 'true'
-        run: npm test --if-present
+        run: npm test
